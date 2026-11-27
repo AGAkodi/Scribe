@@ -1,0 +1,13 @@
+{
+  "package_id": "com.scribe.writingcompanion",
+  "edition": "202601",
+  "name": "Scribe",
+  "version": "0.1.0",
+  "min_sdk_version": "0.0.10",
+  "entrypoint": "index.html",
+  "permissions": [
+    { "name": "network", "desc": "Connect to the Scribe backend for transcription and project notes.", "whitelist": [] },
+    { "name": "g2-microphone", "desc": "Record an idea when you start a capture." }
+  ],
+  "supported_languages": ["en"]
+}
