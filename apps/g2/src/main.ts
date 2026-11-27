@@ -173,3 +173,10 @@ root.querySelector<HTMLButtonElement>('#connect')!.onclick = async () => {
     })
   } catch (e) { status((e as Error).message) }
 }
+// Development only: connect without typing the code. The value comes from
+// .env.development.local, which Vite never loads for production builds.
+const devAccessCode = import.meta.env.DEV ? import.meta.env.VITE_DEV_ACCESS_CODE : undefined
+if (devAccessCode) {
+  root.querySelector<HTMLInputElement>('#token')!.value = devAccessCode
+  root.querySelector<HTMLButtonElement>('#connect')!.click()
+}

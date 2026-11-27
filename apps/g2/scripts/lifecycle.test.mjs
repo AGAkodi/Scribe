@@ -8,6 +8,8 @@ function harness() {
   let source = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
   source = source.replace(/^import \{[^\n]+\} from '@evenrealities\/even_hub_sdk'\s*/m, 'const { waitForEvenAppBridge, TextContainerProperty, CreateStartUpPageContainer, TextContainerUpgrade, OsEventTypeList, DeviceConnectType } = globalThis.sdk\n')
   source = source.replace('import.meta.env.VITE_API_BASE_URL', "''")
+  // Behave like a production build: the dev-only auto-connect stays off.
+  source = source.replace('import.meta.env.DEV', 'false').replace('import.meta.env.VITE_DEV_ACCESS_CODE', 'undefined')
   const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
   const controls = { '#url': { value: 'http://localhost:8000' }, '#token': { value: 'fixture-code' }, '#status': { textContent: '' }, '#connect': {} }
   const root = { innerHTML: '', querySelector: key => controls[key] }

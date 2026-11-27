@@ -16,7 +16,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'DB', str(tmp_path / 'test.sqlite3'))
     main.init_db()
     with main.db() as conn:
-        conn.execute('INSERT INTO sessions VALUES (?, ?)', (hashlib.sha256(('x' * 32).encode()).hexdigest(), time.time() + 3600))
+        conn.execute('INSERT INTO sessions (token_hash, expires) VALUES (?, ?)', (hashlib.sha256(('x' * 32).encode()).hexdigest(), time.time() + 3600))
     return TestClient(main.app)
 
 
@@ -36,12 +36,57 @@ def test_pairing_is_single_use(tmp_path, monkeypatch):
     assert c.get('/actions/missing', headers={'Authorization': 'Bearer ' + response.json()['token']}).status_code == 404
 
 
+def test_access_code_is_reusable_until_expiry(tmp_path, monkeypatch):
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE', 'a' * 32)
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE_EXPIRES', '2099-01-01T00:00:00Z')
+    c = client(tmp_path, monkeypatch)
+    first, second = (c.post('/pair', json={'code': 'a' * 32}) for _ in range(2))
+    assert first.status_code == second.status_code == 200
+    assert first.json()['token'] != second.json()['token']
+    assert c.get('/actions/missing', headers={'Authorization': 'Bearer ' + second.json()['token']}).status_code == 404
+    assert c.post('/pair', json={'code': 'b' * 32}).status_code == 401
+
+
+def test_access_code_session_never_outlives_code(tmp_path, monkeypatch):
+    soon = time.time() + 120
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE', 'a' * 32)
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE_EXPIRES', main.datetime.fromtimestamp(soon, main.timezone.utc).isoformat())
+    c = client(tmp_path, monkeypatch)
+    assert abs(c.post('/pair', json={'code': 'a' * 32}).json()['expires_at'] - soon) <= 1
+
+
+def test_access_code_expired_or_misconfigured_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE', 'a' * 32)
+    for index, expires in enumerate(('2020-01-01T00:00:00Z', '', 'next week')):
+        monkeypatch.setenv('SCRIBE_ACCESS_CODE_EXPIRES', expires)
+        (tmp_path / str(index)).mkdir()
+        c = client(tmp_path / str(index), monkeypatch)
+        assert c.post('/pair', json={'code': 'a' * 32}).status_code == 401
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE', 'short')
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE_EXPIRES', '2099-01-01')
+    assert main.access_code() is None
+
+
+def test_rotating_access_code_revokes_its_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE', 'a' * 32)
+    monkeypatch.setenv('SCRIBE_ACCESS_CODE_EXPIRES', '2099-01-01')
+    c = client(tmp_path, monkeypatch)
+    token = c.post('/pair', json={'code': 'a' * 32}).json()['token']
+    monkeypatch.delenv('SCRIBE_ACCESS_CODE')
+    main.init_db()  # what a restart does
+    assert c.get('/actions/missing', headers={'Authorization': 'Bearer ' + token}).status_code == 401
+    assert c.get('/actions/missing', headers={'Authorization': 'Bearer ' + 'x' * 32}).status_code == 404
+
+
 def test_retrieval_requires_overlap():
     chunks = [{'id': 'a', 'text': 'The advisor hides a rebel letter'}, {'id': 'b', 'text': 'A blue sky'}]
     assert main.rank('advisor rebel', chunks) == chunks[:1]
     assert main.rank('ocean', chunks) == []
     assert main.rank('what is the', chunks) == []
     assert main.rank('rebellion', chunks) == chunks[:1]
+    # Deepgram can transcribe "advisor" as "adviser".
+    assert main.rank('What if the adviser secretly supports them?', chunks) == chunks[:1]
+    assert main.rank('advisers', chunks) == chunks[:1]
 
 
 def test_cancel_and_expired_actions(tmp_path, monkeypatch):
@@ -372,7 +417,7 @@ def test_other_session_cannot_read_cancel_or_confirm_action(tmp_path, monkeypatc
     c = client(tmp_path, monkeypatch)
     other = 'y' * 32
     with main.db() as conn:
-        conn.execute('INSERT INTO sessions VALUES (?, ?)', (hashlib.sha256(other.encode()).hexdigest(), time.time() + 3600))
+        conn.execute('INSERT INTO sessions (token_hash, expires) VALUES (?, ?)', (hashlib.sha256(other.encode()).hexdigest(), time.time() + 3600))
         conn.execute("INSERT INTO actions (id,project,transcript,status,created,owner_hash) VALUES ('private','p','text','pending',?,?)", (time.time(), hashlib.sha256(('x' * 32).encode()).hexdigest()))
         conn.execute("INSERT INTO actions (id,project,transcript,status,created) VALUES ('legacy','p','text','pending',?)", (time.time(),))
     headers = {'Authorization': 'Bearer ' + other}

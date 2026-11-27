@@ -10,6 +10,7 @@ import uuid
 import wave
 from collections import Counter
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, Request
@@ -70,6 +71,11 @@ def init_db():
         if 'notion_url' not in columns:
             conn.execute('ALTER TABLE actions ADD COLUMN notion_url TEXT')
         conn.execute('CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL)')
+        if 'access_hash' not in {row['name'] for row in conn.execute('PRAGMA table_info(sessions)')}:
+            conn.execute('ALTER TABLE sessions ADD COLUMN access_hash TEXT')
+        # Removing or rotating the access code revokes every session it created.
+        access = access_code()
+        conn.execute('DELETE FROM sessions WHERE access_hash IS NOT NULL AND access_hash IS NOT ?', (access[0] if access else None,))
         conn.execute('CREATE TABLE IF NOT EXISTS pairing_codes (code_hash TEXT PRIMARY KEY, expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0)')
         code = os.getenv('SCRIBE_PAIRING_CODE', '')
         if len(code) >= 24:
@@ -97,15 +103,39 @@ class PairRequest(BaseModel):
     code: str = Field(min_length=24, max_length=256)
 
 
+def access_code():
+    """Reusable demo/judge code: (code hash, expiry) or None.
+
+    Needs SCRIBE_ACCESS_CODE (24+ characters) and SCRIBE_ACCESS_CODE_EXPIRES
+    (ISO 8601; UTC when no offset is given). Missing or invalid values disable it.
+    """
+    code = os.getenv('SCRIBE_ACCESS_CODE', '')
+    try:
+        expires = datetime.fromisoformat(os.getenv('SCRIBE_ACCESS_CODE_EXPIRES', ''))
+    except ValueError:
+        return None
+    if len(code) < 24:
+        return None
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return hashlib.sha256(code.encode()).hexdigest(), expires.timestamp()
+
+
 @app.post('/pair')
 def pair(body: PairRequest):
     digest = hashlib.sha256(body.code.encode()).hexdigest()
     token = secrets.token_urlsafe(32)
-    expires = time.time() + 12 * 3600
+    now = time.time()
+    expires, access_hash = now + 12 * 3600, None
+    access = access_code()
     with db() as conn:
-        claimed = conn.execute('UPDATE pairing_codes SET used=1 WHERE code_hash=? AND used=0 AND expires>?', (digest, time.time())).rowcount
-        if not claimed: raise HTTPException(401, 'Pairing code invalid or expired')
-        conn.execute('INSERT INTO sessions VALUES (?, ?)', (hashlib.sha256(token.encode()).hexdigest(), expires))
+        if access and secrets.compare_digest(digest, access[0]) and access[1] > now:
+            # Reusable code: sessions never outlive the code itself.
+            expires, access_hash = min(expires, access[1]), access[0]
+        else:
+            claimed = conn.execute('UPDATE pairing_codes SET used=1 WHERE code_hash=? AND used=0 AND expires>?', (digest, now)).rowcount
+            if not claimed: raise HTTPException(401, 'Pairing code invalid or expired')
+        conn.execute('INSERT INTO sessions (token_hash, expires, access_hash) VALUES (?, ?, ?)', (hashlib.sha256(token.encode()).hexdigest(), expires, access_hash))
     return {'token': token, 'expires_at': int(expires)}
 
 
@@ -198,6 +228,9 @@ def normalize_term(word):
         if len(word) > 3 and word[-1] == word[-2]: word = word[:-1]
     if len(word) > 5 and word.endswith('ing'): word = word[:-3]
     if len(word) > 4 and word.endswith('s'): word = word[:-1]
+    # Transcription may spell a word with -er where the notes use -or
+    # (adviser/advisor), so fold both endings together.
+    if len(word) > 5 and word.endswith('er'): word = word[:-2] + 'or'
     return word
 
 
