@@ -1,0 +1,17 @@
+.research/
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.sqlite*
+*.wav
+*.pcm
+*.mp3
+*.m4a
+*.key
+*.pem
+*.ehpk
+.pytest_cache/
